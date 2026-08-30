@@ -1,0 +1,105 @@
+name: Build MCLauncher for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: '6.8.*'
+
+jobs:
+  build-windows:
+    name: Windows x64 Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Locate CMake project
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $rootProject = Join-Path $root 'CMakeLists.txt'
+          if (Test-Path $rootProject) {
+            $projectRoot = $root
+          } else {
+            $projectFile = Get-ChildItem -Path $root -Filter CMakeLists.txt -File -Recurse |
+              Where-Object { $_.FullName -notmatch '[\\/]build[\\/]' } |
+              Select-Object -First 1
+            if ($null -eq $projectFile) {
+              throw 'CMakeLists.txt не найден в репозитории.'
+            }
+            $projectRoot = $projectFile.Directory.FullName
+          }
+          "PROJECT_ROOT=$projectRoot" >> $env:GITHUB_ENV
+          Write-Host "Найден CMake-проект: $projectRoot"
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          dir: '${{ github.workspace }}'
+          archives: qtbase
+          cache: true
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S "$env:PROJECT_ROOT" -B "$env:GITHUB_WORKSPACE/build" `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cmake --build "$env:GITHUB_WORKSPACE/build" --config Release --parallel
+
+      - name: Bundle Qt runtime
+        shell: pwsh
+        run: |
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" `
+            --release `
+            --compiler-runtime `
+            --no-translations `
+            "$env:GITHUB_WORKSPACE/build/Release/MCLauncher.exe"
+
+      - name: Add documentation
+        shell: pwsh
+        run: |
+          Copy-Item "$env:PROJECT_ROOT/README.md" "$env:GITHUB_WORKSPACE/build/Release/README.md"
+          Copy-Item "$env:PROJECT_ROOT/LICENSE" "$env:GITHUB_WORKSPACE/build/Release/LICENSE"
+
+      - name: Package portable archive
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "$env:GITHUB_WORKSPACE/build/Release/*" `
+            -DestinationPath "$env:GITHUB_WORKSPACE/MCLauncher-windows-x64.zip" `
+            -CompressionLevel Optimal
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCLauncher-windows-x64
+          path: MCLauncher-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach archive to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MCLauncher-windows-x64.zip
+          generate_release_notes: true
